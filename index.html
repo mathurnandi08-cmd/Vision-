@@ -1,0 +1,877 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vein Finder – Real-Time NIR Visualizer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#121212">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+  :root {
+    --bg: #121212;
+    --panel: rgba(18, 18, 18, 0.88);
+    --line: rgba(255, 255, 255, 0.12);
+    --text: #ecefec;
+    --muted: #8f9a93;
+    --neon: #00ff66;
+    --warn: #ffb020;
+    --bad: #ff4d4d;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    overflow: hidden; overscroll-behavior: none; -webkit-user-select: none; user-select: none;
+  }
+  #app { position: fixed; inset: 0; background: var(--bg); }
+
+  #view {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: cover; background: #000; touch-action: none; display: block;
+  }
+  #view.mirror { transform: scaleX(-1); }
+  #cam {
+    position: absolute; width: 2px; height: 2px; opacity: 0; pointer-events: none; left: 0; top: 0;
+  }
+
+  /* HUD */
+  .hud {
+    position: absolute; left: 0; right: 0; top: 0;
+    padding: calc(var(--safe-top) + 10px) 12px 0;
+    display: flex; flex-wrap: wrap; gap: 6px; pointer-events: none; z-index: 5;
+  }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(18, 18, 18, 0.72); border: 1px solid var(--line);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    border-radius: 999px; padding: 5px 10px;
+    font-size: 12px; font-variant-numeric: tabular-nums; letter-spacing: 0.01em;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .chip.good .dot { background: var(--neon); box-shadow: 0 0 8px var(--neon); }
+  .chip.mid .dot { background: var(--warn); }
+  .chip.bad .dot { background: var(--bad); }
+  .chip[hidden] { display: none; }
+
+  /* Control sheet */
+  .sheet {
+    position: absolute; left: 0; right: 0; bottom: 0; z-index: 6;
+    background: var(--panel); border-top: 1px solid var(--line);
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border-radius: 20px 20px 0 0;
+    padding: 0 16px calc(var(--safe-bottom) + 14px);
+    max-width: 640px; margin: 0 auto;
+    transition: transform 0.22s ease;
+  }
+  .sheet.collapsed { transform: translateY(calc(100% - 38px - var(--safe-bottom))); }
+  .grip {
+    display: block; width: 100%; height: 38px; background: none; border: 0; cursor: pointer;
+    position: relative; color: inherit;
+  }
+  .grip::after {
+    content: ""; position: absolute; left: 50%; top: 15px; width: 44px; height: 5px;
+    border-radius: 3px; background: rgba(255, 255, 255, 0.28); transform: translateX(-50%);
+  }
+  .ctl { margin: 4px 0 14px; }
+  .ctl label {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 14px; margin-bottom: 4px;
+  }
+  .ctl output { color: var(--neon); font-variant-numeric: tabular-nums; font-size: 13px; }
+  input[type=range] {
+    width: 100%; height: 32px; margin: 0; background: transparent; accent-color: var(--neon);
+    -webkit-appearance: none; appearance: none; touch-action: pan-y;
+  }
+  input[type=range]::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: rgba(255,255,255,0.2); }
+  input[type=range]::-moz-range-track { height: 4px; border-radius: 2px; background: rgba(255,255,255,0.2); }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 26px; height: 26px; margin-top: -11px; border-radius: 50%;
+    background: var(--neon); border: 3px solid var(--bg); box-shadow: 0 0 0 1px var(--neon);
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 22px; height: 22px; border-radius: 50%; background: var(--neon); border: 3px solid var(--bg);
+  }
+  input[type=range]:focus-visible { outline: 2px solid var(--neon); outline-offset: 2px; border-radius: 6px; }
+
+  .seg {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px;
+    background: rgba(255, 255, 255, 0.07); border-radius: 12px; margin-bottom: 14px;
+  }
+  .seg button, .btn {
+    min-height: 44px; border: 0; border-radius: 9px; font: inherit; font-size: 14px;
+    background: transparent; color: var(--text); cursor: pointer; padding: 0 12px;
+  }
+  .seg button[aria-pressed="true"] { background: var(--neon); color: #05140a; font-weight: 600; }
+  .row { display: flex; gap: 8px; }
+  .btn {
+    flex: 1; background: rgba(255, 255, 255, 0.09); border: 1px solid var(--line);
+  }
+  .btn:active { background: rgba(255, 255, 255, 0.18); }
+  .btn[aria-pressed="true"] { border-color: var(--neon); color: var(--neon); }
+  .btn[hidden] { display: none; }
+  button:focus-visible { outline: 2px solid var(--neon); outline-offset: 2px; }
+
+  /* Gate (start / error) */
+  #gate {
+    position: absolute; inset: 0; z-index: 10; background: var(--bg);
+    display: flex; flex-direction: column; justify-content: center; align-items: flex-start;
+    padding: calc(var(--safe-top) + 24px) 26px calc(var(--safe-bottom) + 24px);
+    max-width: 520px; margin: 0 auto; gap: 14px;
+  }
+  #gate[hidden] { display: none; }
+  #gate h1 { margin: 0; font-size: 28px; line-height: 1.15; font-weight: 700; letter-spacing: -0.01em; }
+  #gate h1.err { color: var(--bad); }
+  #gate p { margin: 0; color: #c3cbc6; line-height: 1.5; font-size: 15px; max-width: 46ch; }
+  #gate p.small { color: var(--muted); font-size: 13px; }
+  #gateBtn {
+    min-height: 52px; padding: 0 28px; border: 0; border-radius: 14px; background: var(--neon);
+    color: #05140a; font: inherit; font-size: 17px; font-weight: 700; cursor: pointer; margin-top: 6px;
+  }
+  #gateBtn[hidden] { display: none; }
+  .swatch { width: 44px; height: 4px; border-radius: 2px; background: var(--neon); box-shadow: 0 0 12px var(--neon); }
+  @media (prefers-reduced-motion: reduce) { .sheet { transition: none; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="view" aria-label="Processed camera view"></canvas>
+  <video id="cam" playsinline muted autoplay disablepictureinpicture></video>
+
+  <div class="hud" aria-live="off">
+    <span class="chip" id="fpsChip"><span class="dot"></span><span id="fpsTxt">-- FPS</span></span>
+    <span class="chip" id="resChip">--</span>
+    <span class="chip" id="engChip">--</span>
+    <span class="chip" id="liteChip" hidden>Lite mode</span>
+  </div>
+
+  <section class="sheet" id="sheet" aria-label="Controls">
+    <button class="grip" id="grip" aria-label="Show or hide controls" aria-expanded="true"></button>
+
+    <div class="ctl">
+      <label for="gain">Contrast gain <output id="gainOut"></output></label>
+      <input type="range" id="gain" min="0.5" max="4" step="0.1">
+    </div>
+    <div class="ctl">
+      <label for="sens">Threshold sensitivity <output id="sensOut"></output></label>
+      <input type="range" id="sens" min="0" max="100" step="1">
+    </div>
+    <div class="ctl">
+      <label for="opacity">Blend opacity <output id="opacityOut"></output></label>
+      <input type="range" id="opacity" min="0" max="100" step="1">
+    </div>
+
+    <div class="seg" role="group" aria-label="Color map">
+      <button type="button" data-mode="neon" aria-pressed="true">Neon green</button>
+      <button type="button" data-mode="invert" aria-pressed="false">Inverted mono</button>
+    </div>
+
+    <div class="row">
+      <button class="btn" id="flipBtn" type="button">Switch camera</button>
+      <button class="btn" id="torchBtn" type="button" aria-pressed="false" hidden>Torch</button>
+      <button class="btn" id="resetBtn" type="button">Reset</button>
+    </div>
+  </section>
+
+  <div id="gate">
+    <div class="swatch"></div>
+    <h1 id="gateTitle">Vein Finder</h1>
+    <p id="gateBody">Point the camera at skin in a dim room. The app boosts the dark vessel pattern under the surface and marks it in green.</p>
+    <p class="small" id="gateNote">Visualization aid only, not a medical device. Phone cameras usually block near-infrared light, so results depend on your camera and lighting. For best results, use an 850 nm LED lamp and a camera without an IR-cut filter. Video stays on your device.</p>
+    <button id="gateBtn" type="button">Start camera</button>
+  </div>
+</div>
+
+<script>
+/* ==========================================================================
+ * Worker engine
+ * --------------------------------------------------------------------------
+ * workerMain(self) is stringified into a Blob URL to create an inline Web Worker.
+ * If Workers/Blob URLs are blocked, the same function runs on the main thread
+ * against a small shim (slower, but the app keeps working).
+ *
+ * Pipeline per frame (all on typed arrays, no per-frame allocation in worker):
+ *   1. Spectral separation  : red-weighted monochrome (0.70 R + 0.30 G)
+ *   2. Denoise              : 5x5 edge-preserving bilateral filter (3x3 in Lite)
+ *   3. Contrast             : CLAHE, 8x8 tiles, clip limit driven by Contrast Gain,
+ *                             tile LUTs smoothed over time to stop flicker
+ *   4. Tubular features     : multi-scale Hessian vesselness for DARK ridges
+ *   5. Color map            : soft threshold -> neon green blend, or inverted mono
+ * ========================================================================== */
+function workerMain(self) {
+  'use strict';
+
+  var GX = 8, GY = 8;
+  var W = 0, H = 0, N = 0;
+  var gray, den, eq, eqF, fa, fb, vess, mask, hist, lut, lutF, lutInit, scaleSm;
+  var txOf, tyOf, x0off, x1off, wxA, y0off, y1off, wyA;
+  var outPool = [];
+  var vh = new Int32Array(256);
+  var P = { gain: 1.5, sens: 55, opacity: 0.85, mode: 0, lite: false };
+
+  // Range weights for the bilateral filter (8-bit intensity difference)
+  var rangeLUT = new Float32Array(256);
+  (function () {
+    var sr = 22;
+    for (var d = 0; d < 256; d++) rangeLUT[d] = Math.exp(-(d * d) / (2 * sr * sr));
+  })();
+
+  function spatialWeights(r, sigma) {
+    var side = 2 * r + 1, w = new Float32Array(side * side), k = 0;
+    for (var dy = -r; dy <= r; dy++)
+      for (var dx = -r; dx <= r; dx++)
+        w[k++] = Math.exp(-(dx * dx + dy * dy) / (2 * sigma * sigma));
+    return w;
+  }
+  var ws5 = spatialWeights(2, 1.5);
+  var ws3 = spatialWeights(1, 1.0);
+
+  var kernels = {};
+  function getKernel(sigma) {
+    if (kernels[sigma]) return kernels[sigma];
+    var r = Math.ceil(sigma * 2.5), k = new Float32Array(2 * r + 1), s = 0, i;
+    for (i = -r; i <= r; i++) { k[i + r] = Math.exp(-(i * i) / (2 * sigma * sigma)); s += k[i + r]; }
+    for (i = 0; i < k.length; i++) k[i] /= s;
+    kernels[sigma] = { k: k, r: r };
+    return kernels[sigma];
+  }
+
+  function configure(w, h) {
+    W = w; H = h; N = w * h;
+    gray = new Uint8Array(N); den = new Uint8Array(N); eq = new Uint8Array(N);
+    eqF = new Float32Array(N); fa = new Float32Array(N); fb = new Float32Array(N);
+    vess = new Float32Array(N); mask = new Float32Array(N);
+    hist = new Int32Array(GX * GY * 256);
+    lut = new Float32Array(GX * GY * 256);
+    lutF = new Float32Array(GX * GY * 256);
+    lutInit = false; scaleSm = 10; outPool.length = 0;
+
+    txOf = new Uint8Array(W); tyOf = new Uint8Array(H);
+    x0off = new Int32Array(W); x1off = new Int32Array(W); wxA = new Float32Array(W);
+    y0off = new Int32Array(H); y1off = new Int32Array(H); wyA = new Float32Array(H);
+    var i, fx, a, b;
+    for (i = 0; i < W; i++) {
+      txOf[i] = Math.min(GX - 1, (i * GX / W) | 0);
+      fx = (i + 0.5) * GX / W - 0.5; a = Math.floor(fx); wxA[i] = fx - a; b = a + 1;
+      a = Math.max(0, Math.min(GX - 1, a)); b = Math.max(0, Math.min(GX - 1, b));
+      x0off[i] = a << 8; x1off[i] = b << 8;
+    }
+    for (i = 0; i < H; i++) {
+      tyOf[i] = Math.min(GY - 1, (i * GY / H) | 0);
+      fx = (i + 0.5) * GY / H - 0.5; a = Math.floor(fx); wyA[i] = fx - a; b = a + 1;
+      a = Math.max(0, Math.min(GY - 1, a)); b = Math.max(0, Math.min(GY - 1, b));
+      y0off[i] = (a * GX) << 8; y1off[i] = (b * GX) << 8;
+    }
+  }
+
+  /* 2. Edge-preserving bilateral filter (radius r) */
+  function bilateral(src, dst, r, ws) {
+    dst.set(src);
+    var x, y, i, c, sum, wsum, k, dy, dx, row, v, d, w;
+    for (y = r; y < H - r; y++) {
+      for (x = r; x < W - r; x++) {
+        i = y * W + x; c = src[i]; sum = 0; wsum = 0; k = 0;
+        for (dy = -r; dy <= r; dy++) {
+          row = i + dy * W;
+          for (dx = -r; dx <= r; dx++) {
+            v = src[row + dx]; d = v - c; if (d < 0) d = -d;
+            w = ws[k++] * rangeLUT[d];
+            sum += w * v; wsum += w;
+          }
+        }
+        dst[i] = (sum / wsum + 0.5) | 0;
+      }
+    }
+  }
+
+  /* 3. CLAHE with GX x GY tiles, bilinear tile blending */
+  function clahe(src, dst, clipLimit) {
+    var x, y, t, b, i, row, base, total, clip, excess, h, add, rem, step, cdf, sc;
+    hist.fill(0);
+    for (y = 0; y < H; y++) {
+      var tb = tyOf[y] * GX; row = y * W;
+      for (x = 0; x < W; x++) hist[((tb + txOf[x]) << 8) + src[row + x]]++;
+    }
+    var tiles = GX * GY;
+    for (t = 0; t < tiles; t++) {
+      base = t << 8; total = 0;
+      for (b = 0; b < 256; b++) total += hist[base + b];
+      if (total === 0) { for (b = 0; b < 256; b++) lut[base + b] = b; continue; }
+      clip = Math.max(1, (clipLimit * total / 256) | 0);
+      excess = 0;
+      for (b = 0; b < 256; b++) {
+        h = hist[base + b];
+        if (h > clip) { excess += h - clip; hist[base + b] = clip; }
+      }
+      add = (excess / 256) | 0; rem = excess - add * 256;
+      for (b = 0; b < 256; b++) hist[base + b] += add;
+      if (rem > 0) {
+        step = Math.max(1, (256 / rem) | 0);
+        for (b = 0; b < 256 && rem > 0; b += step) { hist[base + b]++; rem--; }
+      }
+      cdf = 0; sc = 255 / total;
+      for (b = 0; b < 256; b++) { cdf += hist[base + b]; lut[base + b] = cdf * sc; }
+    }
+    // Temporal smoothing of the tile mappings removes frame-to-frame flicker
+    var n = lut.length;
+    if (!lutInit) { lutF.set(lut); lutInit = true; }
+    else for (i = 0; i < n; i++) lutF[i] += (lut[i] - lutF[i]) * 0.4;
+
+    var yo0, yo1, wy, xo0, xo1, wx, v, a, bb, c, d, top, bot;
+    for (y = 0; y < H; y++) {
+      yo0 = y0off[y]; yo1 = y1off[y]; wy = wyA[y]; row = y * W;
+      for (x = 0; x < W; x++) {
+        v = src[row + x]; xo0 = x0off[x]; xo1 = x1off[x]; wx = wxA[x];
+        a = lutF[yo0 + xo0 + v]; bb = lutF[yo0 + xo1 + v];
+        c = lutF[yo1 + xo0 + v]; d = lutF[yo1 + xo1 + v];
+        top = a + (bb - a) * wx; bot = c + (d - c) * wx;
+        dst[row + x] = (top + (bot - top) * wy + 0.5) | 0;
+      }
+    }
+  }
+
+  /* Separable Gaussian blur on float buffers */
+  function blurH(src, dst, K) {
+    var k = K.k, r = K.r, x, y, j, s, row, xx;
+    for (y = 0; y < H; y++) {
+      row = y * W;
+      for (x = 0; x < W; x++) {
+        s = 0;
+        if (x >= r && x < W - r) {
+          for (j = -r; j <= r; j++) s += k[j + r] * src[row + x + j];
+        } else {
+          for (j = -r; j <= r; j++) {
+            xx = x + j; xx = xx < 0 ? 0 : (xx >= W ? W - 1 : xx);
+            s += k[j + r] * src[row + xx];
+          }
+        }
+        dst[row + x] = s;
+      }
+    }
+  }
+  function blurV(src, dst, K) {
+    var k = K.k, r = K.r, x, y, j, s, yy;
+    for (y = 0; y < H; y++) {
+      for (x = 0; x < W; x++) {
+        s = 0;
+        if (y >= r && y < H - r) {
+          for (j = -r; j <= r; j++) s += k[j + r] * src[(y + j) * W + x];
+        } else {
+          for (j = -r; j <= r; j++) {
+            yy = y + j; yy = yy < 0 ? 0 : (yy >= H ? H - 1 : yy);
+            s += k[j + r] * src[yy * W + x];
+          }
+        }
+        dst[y * W + x] = s;
+      }
+    }
+  }
+
+  /* 4. Hessian vesselness for dark tubular structures (valleys in intensity) */
+  function accumulateVesselness(norm) {
+    var x, y, i, c, ixx, iyy, ixy, m, dd, t, l1, l2, rb, v0, v;
+    for (y = 1; y < H - 1; y++) {
+      for (x = 1; x < W - 1; x++) {
+        i = y * W + x; c = fb[i] * 2;
+        ixx = fb[i - 1] + fb[i + 1] - c;
+        iyy = fb[i - W] + fb[i + W] - c;
+        ixy = (fb[i + W + 1] - fb[i + W - 1] - fb[i - W + 1] + fb[i - W - 1]) * 0.25;
+        m = (ixx + iyy) * 0.5; dd = (ixx - iyy) * 0.5;
+        t = Math.sqrt(dd * dd + ixy * ixy);
+        l2 = m + t;                       // large positive curvature across a dark vessel
+        if (l2 <= 0) continue;            // not a valley: flat skin, bright ridge
+        v0 = l2 * norm;
+        if (v0 < 0.5) continue;           // noise floor, skip the exp()
+        l1 = m - t;                       // curvature along the vessel (should be ~0)
+        rb = Math.abs(l1) / l2;
+        v = v0 * Math.exp(-rb * rb * 3.125); // penalize blobs/corners (beta = 0.4)
+        if (v > vess[i]) vess[i] = v;
+      }
+    }
+  }
+
+  function vesselness() {
+    var s, i, K, scales = P.lite ? [2.0] : [1.5, 2.5];
+    for (i = 0; i < N; i++) eqF[i] = eq[i];
+    vess.fill(0);
+    for (s = 0; s < scales.length; s++) {
+      K = getKernel(scales[s]);
+      blurH(eqF, fa, K); blurV(fa, fb, K);
+      accumulateVesselness(scales[s] * scales[s]);
+    }
+    // Robust adaptive normalization: 98.5th percentile, smoothed, with a noise floor
+    vh.fill(0);
+    var b;
+    for (i = 0; i < N; i++) { b = (vess[i] * 4) | 0; if (b > 255) b = 255; vh[b]++; }
+    var target = N * 0.985, acc = 0, p = 255;
+    for (b = 0; b < 256; b++) { acc += vh[b]; if (acc >= target) { p = b + 1; break; } }
+    scaleSm = scaleSm * 0.8 + (p / 4) * 0.2;
+  }
+
+  /* 5. Soft threshold, temporal smoothing, color mapping */
+  function compose(out) {
+    var scale = Math.max(scaleSm, 8), inv = 1 / scale;
+    var pg = 1 + (P.gain - 1) * 0.25;
+    var t = 0.55 - 0.5 * (P.sens / 100), edge = 0.25;
+    var op = P.opacity, neon = P.mode === 0;
+    var i, p, vn, m, mk, g, a, ia, bse, v;
+    for (i = 0; i < N; i++) {
+      vn = vess[i] * inv;
+      m = (vn - t) / edge;
+      if (m <= 0) m = 0; else if (m >= 1) m = 1; else m = m * m * (3 - 2 * m);
+      mk = mask[i] = mask[i] * 0.4 + m * 0.6;
+      g = (eq[i] - 128) * pg + 128;
+      if (g < 0) g = 0; else if (g > 255) g = 255;
+      a = op * mk; p = i << 2;
+      if (neon) {
+        ia = 1 - a;
+        out[p] = g * ia;
+        out[p + 1] = g * ia + 255 * a;
+        out[p + 2] = g * ia + 102 * a;       // #00FF66
+      } else {
+        bse = (255 - g) * 0.8;               // inverted: vessels turn bright
+        v = bse * (1 - a) + 255 * a;
+        out[p] = v; out[p + 1] = v; out[p + 2] = v;
+      }
+      out[p + 3] = 255;
+    }
+  }
+
+  function process(src, out) {
+    var i, p;
+    // 1. Spectral separation (red-dominant monochrome)
+    for (i = 0, p = 0; i < N; i++, p += 4) gray[i] = (src[p] * 179 + src[p + 1] * 77) >> 8;
+    // 2. Denoise
+    if (P.lite) bilateral(gray, den, 1, ws3); else bilateral(gray, den, 2, ws5);
+    // 3. CLAHE
+    clahe(den, eq, 1.5 + P.gain * 1.2);
+    // 4. Vesselness
+    vesselness();
+    // 5. Color map
+    compose(out);
+  }
+
+  self.onmessage = function (e) {
+    var d = e.data, k;
+    switch (d.type) {
+      case 'config':
+        configure(d.w, d.h);
+        self.postMessage({ type: 'ready', w: d.w, h: d.h });
+        break;
+      case 'params':
+        for (k in d) if (k !== 'type') P[k] = d[k];
+        break;
+      case 'recycle':
+        if (d.buf && d.buf.byteLength === N * 4 && outPool.length < 3) outPool.push(d.buf);
+        break;
+      case 'frame':
+        if (!N || !d.buf || d.buf.byteLength !== N * 4) { self.postMessage({ type: 'drop', id: d.id }); break; }
+        try {
+          var t0 = performance.now();
+          var ob = outPool.pop() || new ArrayBuffer(N * 4);
+          process(new Uint8ClampedArray(d.buf), new Uint8ClampedArray(ob));
+          var ms = performance.now() - t0;
+          self.postMessage({ type: 'result', buf: ob, w: W, h: H, ms: ms, id: d.id }, [ob]);
+        } catch (err) {
+          self.postMessage({ type: 'error', message: String(err && err.message || err) });
+        }
+        break;
+    }
+  };
+}
+
+/* ==========================================================================
+ * Main thread: camera, scheduling, UI
+ * ========================================================================== */
+(function () {
+  'use strict';
+
+  var MAX_W = 320, MAX_H = 240, TARGET_FPS = 30;
+  var MIN_INTERVAL = 1000 / TARGET_FPS - 5;   // tolerate camera timing jitter
+  var STORE_KEY = 'veinfinder.settings.v1';
+  var DEFAULTS = { gain: 1.5, sens: 55, opacity: 85, mode: 'neon' };
+
+  function $(id) { return document.getElementById(id); }
+  var view = $('view'), vctx = view.getContext('2d', { alpha: false });
+  var video = $('cam');
+  var cap = document.createElement('canvas');
+  var cctx = cap.getContext('2d', { willReadFrequently: true, alpha: false });
+
+  var el = {
+    fpsChip: $('fpsChip'), fpsTxt: $('fpsTxt'), resChip: $('resChip'), engChip: $('engChip'), liteChip: $('liteChip'),
+    sheet: $('sheet'), grip: $('grip'),
+    gain: $('gain'), sens: $('sens'), opacity: $('opacity'),
+    gainOut: $('gainOut'), sensOut: $('sensOut'), opacityOut: $('opacityOut'),
+    flip: $('flipBtn'), torch: $('torchBtn'), reset: $('resetBtn'),
+    gate: $('gate'), gateTitle: $('gateTitle'), gateBody: $('gateBody'), gateNote: $('gateNote'), gateBtn: $('gateBtn')
+  };
+  var modeBtns = Array.prototype.slice.call(document.querySelectorAll('.seg button'));
+
+  var state = {
+    facing: 'environment', wantRunning: false, running: false,
+    stream: null, track: null, camW: 0, camH: 0,
+    vw: 0, vh: 0, w: 0, h: 0,
+    inFlight: false, sentAt: 0, lastSend: 0, frameId: 0, lastVideoTime: -1,
+    handle: 0, usingRVFC: false,
+    lite: false, slowCount: 0, emaMs: 0,
+    frames: 0, fpsT0: performance.now(), torch: false
+  };
+
+  /* ---------------- settings ---------------- */
+  var settings = loadSettings();
+  function loadSettings() {
+    var s = {}, k;
+    for (k in DEFAULTS) s[k] = DEFAULTS[k];
+    try {
+      var raw = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
+      if (raw && typeof raw === 'object') {
+        if (isFinite(raw.gain)) s.gain = Math.min(4, Math.max(0.5, +raw.gain));
+        if (isFinite(raw.sens)) s.sens = Math.min(100, Math.max(0, +raw.sens));
+        if (isFinite(raw.opacity)) s.opacity = Math.min(100, Math.max(0, +raw.opacity));
+        if (raw.mode === 'neon' || raw.mode === 'invert') s.mode = raw.mode;
+      }
+    } catch (e) { /* storage unavailable: use defaults */ }
+    return s;
+  }
+  function saveSettings() {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ }
+  }
+  function syncUI() {
+    el.gain.value = settings.gain; el.sens.value = settings.sens; el.opacity.value = settings.opacity;
+    el.gainOut.textContent = (+settings.gain).toFixed(1) + '×';
+    el.sensOut.textContent = Math.round(settings.sens);
+    el.opacityOut.textContent = Math.round(settings.opacity) + '%';
+    modeBtns.forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.mode === settings.mode)); });
+  }
+  function pushParams() {
+    if (!engine) return;
+    engine.post({
+      type: 'params', gain: +settings.gain, sens: +settings.sens,
+      opacity: settings.opacity / 100, mode: settings.mode === 'neon' ? 0 : 1, lite: state.lite
+    });
+  }
+
+  /* ---------------- processing engine (worker or fallback) ---------------- */
+  var engine = null;
+
+  function createWorkerEngine() {
+    var src = '(' + workerMain.toString() + ')(self);';
+    var url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+    var w = new Worker(url);
+    var eng = {
+      kind: 'worker',
+      onmessage: null,
+      post: function (msg, tr) { w.postMessage(msg, tr || []); },
+      terminate: function () { try { w.terminate(); } catch (e) {} try { URL.revokeObjectURL(url); } catch (e) {} }
+    };
+    w.onmessage = function (ev) { if (eng.onmessage) eng.onmessage(ev.data); };
+    w.onerror = function (ev) {
+      console.warn('Worker failed, falling back to main thread:', ev && ev.message);
+      if (engine === eng) switchToMainEngine();
+    };
+    return eng;
+  }
+
+  function createMainEngine() {
+    var eng = { kind: 'main', onmessage: null };
+    var scope = {
+      onmessage: null,
+      postMessage: function (msg) { setTimeout(function () { if (eng.onmessage) eng.onmessage(msg); }, 0); }
+    };
+    workerMain(scope);
+    eng.post = function (msg) { setTimeout(function () { if (scope.onmessage) scope.onmessage({ data: msg }); }, 0); };
+    eng.terminate = function () { eng.onmessage = null; };
+    return eng;
+  }
+
+  function attachEngine(eng) {
+    engine = eng;
+    eng.onmessage = onEngineMessage;
+    state.inFlight = false;
+    el.engChip.textContent = eng.kind === 'worker' ? 'Worker thread' : 'Main thread (fallback)';
+    pushParams();
+    if (state.w) eng.post({ type: 'config', w: state.w, h: state.h });
+  }
+
+  function switchToMainEngine() {
+    if (engine) engine.terminate();
+    attachEngine(createMainEngine());
+  }
+
+  function initEngine() {
+    try {
+      if (typeof Worker === 'undefined' || typeof Blob === 'undefined') throw new Error('No Worker support');
+      attachEngine(createWorkerEngine());
+    } catch (e) {
+      console.warn('Using main-thread fallback:', e);
+      attachEngine(createMainEngine());
+    }
+  }
+
+  function onEngineMessage(d) {
+    switch (d.type) {
+      case 'drop': state.inFlight = false; break;
+      case 'error': state.inFlight = false; console.error('Processing error:', d.message); break;
+      case 'result': state.inFlight = false; present(d); break;
+      default: break;
+    }
+  }
+
+  function present(d) {
+    if (view.width !== d.w || view.height !== d.h) { view.width = d.w; view.height = d.h; }
+    vctx.putImageData(new ImageData(new Uint8ClampedArray(d.buf), d.w, d.h), 0, 0);
+    engine.post({ type: 'recycle', buf: d.buf }, [d.buf]);   // zero-copy buffer return for reuse
+    state.frames++;
+
+    state.emaMs = state.emaMs ? state.emaMs * 0.9 + d.ms * 0.1 : d.ms;
+    if (!state.lite && state.emaMs > 26) {
+      if (++state.slowCount > 45) {          // sustained slowness: drop to a cheaper pipeline
+        state.lite = true; el.liteChip.hidden = false; pushParams();
+      }
+    } else state.slowCount = 0;
+  }
+
+  /* ---------------- HUD ---------------- */
+  setInterval(function () {
+    var now = performance.now(), dt = now - state.fpsT0;
+    var fps = state.running ? state.frames * 1000 / dt : 0;
+    state.frames = 0; state.fpsT0 = now;
+    el.fpsTxt.textContent = (state.running ? Math.round(fps) : '--') + ' FPS' +
+      (state.running && state.emaMs ? ' · ' + state.emaMs.toFixed(1) + ' ms' : '');
+    el.fpsChip.className = 'chip ' + (!state.running ? '' : fps >= 24 ? 'good' : fps >= 15 ? 'mid' : 'bad');
+  }, 500);
+
+  function updateResChip() {
+    el.resChip.textContent = state.w
+      ? state.w + '×' + state.h + ' processed' + (state.camW ? ' · cam ' + state.camW + '×' + state.camH : '')
+      : '--';
+  }
+
+  /* ---------------- gate (start / error screen) ---------------- */
+  function showGate(o) {
+    el.gate.hidden = false;
+    el.gateTitle.textContent = o.title;
+    el.gateTitle.className = o.error ? 'err' : '';
+    el.gateBody.textContent = o.body;
+    el.gateNote.hidden = !!o.error;
+    el.gateBtn.hidden = !o.button;
+    el.gateBtn.textContent = o.button || '';
+  }
+  function hideGate() { el.gate.hidden = true; }
+
+  function describeError(err) {
+    var n = err && err.name, m = (err && err.message) || '';
+    if (n === 'NotAllowedError' || n === 'PermissionDeniedError')
+      return { title: 'Camera access blocked', body: 'Allow camera access for this site in your browser settings, then tap Retry.' };
+    if (n === 'NotFoundError' || n === 'DevicesNotFoundError' || n === 'OverconstrainedError')
+      return { title: 'No camera found', body: 'This device has no usable camera for the selected direction. Connect one, or try the other camera, then tap Retry.' };
+    if (n === 'NotReadableError' || n === 'TrackStartError' || n === 'AbortError')
+      return { title: 'Camera is busy', body: 'Another app or tab is using the camera. Close it and tap Retry.' };
+    if (n === 'SecurityError')
+      return { title: 'Camera blocked by security policy', body: 'Open this page over HTTPS (or localhost) and make sure the embedding page allows camera access.' };
+    return { title: 'Camera could not start', body: (m || 'Unknown error') + ' Tap Retry to try again.' };
+  }
+
+  /* ---------------- camera ---------------- */
+  function stopLoop() {
+    state.running = false;
+    try {
+      if (state.usingRVFC && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(state.handle);
+      else cancelAnimationFrame(state.handle);
+    } catch (e) {}
+  }
+  function stopCamera() {
+    stopLoop();
+    if (state.stream) state.stream.getTracks().forEach(function (t) { t.onended = null; t.stop(); });
+    state.stream = null; state.track = null; state.torch = false;
+    video.srcObject = null;
+    el.torch.hidden = true; el.torch.setAttribute('aria-pressed', 'false');
+  }
+
+  function constraintAttempts(facing) {
+    var f = { ideal: facing };
+    return [
+      // Strict QVGA cap at 30 fps
+      { audio: false, video: { facingMode: f, width: { ideal: 320, max: 320 }, height: { ideal: 240, max: 240 }, frameRate: { ideal: 30, max: 30 } } },
+      // Soft cap: ask for QVGA, accept up to VGA (downscaled to <=320x240 before processing)
+      { audio: false, video: { facingMode: f, width: { ideal: 320, max: 640 }, height: { ideal: 240, max: 480 }, frameRate: { ideal: 30, max: 30 } } },
+      { audio: false, video: { facingMode: f } },
+      { audio: false, video: true }
+    ];
+  }
+
+  async function startCamera() {
+    state.wantRunning = true;
+    stopCamera();
+    showGate({ title: 'Starting camera…', body: 'Approve the camera permission prompt if it appears.', button: '' });
+
+    if (!window.isSecureContext) {
+      showGate({ title: 'HTTPS required', body: 'Browsers only allow camera access on secure pages. Open this file from an https:// address or from localhost.', button: 'Retry', error: true });
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showGate({ title: 'Camera not supported', body: 'This browser does not support camera capture. Try a current version of Chrome, Edge, Firefox or Safari.', button: 'Retry', error: true });
+      return;
+    }
+
+    var attempts = constraintAttempts(state.facing), stream = null, lastErr = null, i;
+    for (i = 0; i < attempts.length && !stream; i++) {
+      try { stream = await navigator.mediaDevices.getUserMedia(attempts[i]); }
+      catch (err) {
+        lastErr = err;
+        if (err && (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError' ||
+            err.name === 'SecurityError' || err.name === 'NotReadableError' || err.name === 'NotFoundError')) break;
+      }
+    }
+    if (!stream) {
+      var d = describeError(lastErr);
+      showGate({ title: d.title, body: d.body, button: 'Retry', error: true });
+      return;
+    }
+    if (!state.wantRunning) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
+
+    state.stream = stream; state.track = stream.getVideoTracks()[0];
+    state.track.onended = function () {
+      stopCamera();
+      showGate({ title: 'Camera disconnected', body: 'The camera stopped sending video. Reconnect it and tap Retry.', button: 'Retry', error: true });
+    };
+
+    video.srcObject = stream;
+    try { await video.play(); } catch (e) { /* autoplay may need a gesture; metadata wait below still works */ }
+    if (!video.videoWidth) {
+      await new Promise(function (res) {
+        var done = false;
+        function fin() { if (!done) { done = true; video.removeEventListener('loadedmetadata', fin); res(); } }
+        video.addEventListener('loadedmetadata', fin); setTimeout(fin, 4000);
+      });
+    }
+    if (!video.videoWidth) {
+      stopCamera();
+      showGate({ title: 'No video received', body: 'The camera started but sent no frames. Tap Retry, or try the other camera.', button: 'Retry', error: true });
+      return;
+    }
+
+    var s = (state.track.getSettings && state.track.getSettings()) || {};
+    state.camW = s.width || video.videoWidth; state.camH = s.height || video.videoHeight;
+    var front = s.facingMode ? s.facingMode === 'user' : state.facing === 'user';
+    view.classList.toggle('mirror', front);
+
+    try {
+      var caps = state.track.getCapabilities ? state.track.getCapabilities() : null;
+      el.torch.hidden = !(caps && caps.torch);
+    } catch (e) { el.torch.hidden = true; }
+
+    state.vw = 0; state.vh = 0; state.lastVideoTime = -1; state.inFlight = false;
+    hideGate();
+    startLoop();
+  }
+
+  function applyDims(vw, vh) {
+    // Downscale to fit inside 320x240 (or 240x320 for portrait frames); never upscale.
+    var long = Math.max(vw, vh), short = Math.min(vw, vh);
+    var s = Math.min(1, MAX_W / long, MAX_H / short);
+    var w = Math.max(16, ((Math.round(vw * s)) >> 1) << 1);
+    var h = Math.max(16, ((Math.round(vh * s)) >> 1) << 1);
+    state.vw = vw; state.vh = vh; state.w = w; state.h = h;
+    cap.width = w; cap.height = h;
+    state.inFlight = false;
+    engine.post({ type: 'config', w: w, h: h });
+    updateResChip();
+  }
+
+  function startLoop() {
+    state.running = true; state.usingRVFC = typeof video.requestVideoFrameCallback === 'function';
+    schedule();
+  }
+  function schedule() {
+    state.handle = state.usingRVFC ? video.requestVideoFrameCallback(tick) : requestAnimationFrame(tick);
+  }
+
+  function tick() {
+    if (!state.running) return;
+    schedule();
+    if (document.hidden || video.readyState < 2) return;
+
+    var vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) return;
+    if (vw !== state.vw || vh !== state.vh) applyDims(vw, vh);
+
+    var now = performance.now();
+    if (state.inFlight) {
+      if (now - state.sentAt > 1500) state.inFlight = false;   // watchdog for a lost reply
+      else return;                                             // back-pressure: drop this frame
+    }
+    if (now - state.lastSend < MIN_INTERVAL) return;
+    if (video.currentTime === state.lastVideoTime) return;     // no new camera frame yet
+    state.lastVideoTime = video.currentTime;
+    state.lastSend = now; state.sentAt = now;
+
+    cctx.drawImage(video, 0, 0, state.w, state.h);             // GPU-assisted downscale to <=QVGA
+    var img = cctx.getImageData(0, 0, state.w, state.h);
+    state.inFlight = true;
+    state.frameId++;
+    engine.post({ type: 'frame', buf: img.data.buffer, id: state.frameId }, [img.data.buffer]);
+  }
+
+  /* ---------------- UI events ---------------- */
+  el.gateBtn.addEventListener('click', startCamera);
+
+  el.flip.addEventListener('click', function () {
+    state.facing = state.facing === 'user' ? 'environment' : 'user';
+    startCamera();
+  });
+
+  el.torch.addEventListener('click', async function () {
+    if (!state.track) return;
+    var next = !state.torch;
+    try {
+      await state.track.applyConstraints({ advanced: [{ torch: next }] });
+      state.torch = next;
+    } catch (e) { state.torch = false; }
+    el.torch.setAttribute('aria-pressed', String(state.torch));
+  });
+
+  el.reset.addEventListener('click', function () {
+    for (var k in DEFAULTS) settings[k] = DEFAULTS[k];
+    syncUI(); saveSettings(); pushParams();
+  });
+
+  el.grip.addEventListener('click', function () {
+    var c = el.sheet.classList.toggle('collapsed');
+    el.grip.setAttribute('aria-expanded', String(!c));
+  });
+
+  function bindRange(input, key, out) {
+    input.addEventListener('input', function () {
+      settings[key] = +input.value; syncUI(); pushParams();
+    });
+    input.addEventListener('change', saveSettings);
+  }
+  bindRange(el.gain, 'gain'); bindRange(el.sens, 'sens'); bindRange(el.opacity, 'opacity');
+
+  modeBtns.forEach(function (b) {
+    b.addEventListener('click', function () {
+      settings.mode = b.dataset.mode; syncUI(); saveSettings(); pushParams();
+    });
+  });
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { if (state.wantRunning && state.stream) { stopCamera(); state.resumeOnShow = true; } }
+    else if (state.resumeOnShow) { state.resumeOnShow = false; startCamera(); }
+  });
+  window.addEventListener('pagehide', stopCamera);
+
+  /* ---------------- boot ---------------- */
+  syncUI();
+  initEngine();
+  updateResChip();
+  if (!window.isSecureContext) {
+    showGate({ title: 'HTTPS required', body: 'Browsers only allow camera access on secure pages. Open this file from an https:// address or from localhost.', button: 'Retry', error: true });
+  }
+})();
+</script>
+</body>
+</html>
