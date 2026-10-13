@@ -106,6 +106,13 @@
     background: transparent; color: var(--text); cursor: pointer; padding: 0 12px;
   }
   .seg button[aria-pressed="true"] { background: var(--neon); color: #05140a; font-weight: 600; }
+  select {
+    width: 100%; min-height: 44px; padding: 0 12px; margin: 0; font: inherit; font-size: 14px;
+    color: var(--text); background: rgba(255, 255, 255, 0.09); border: 1px solid var(--line);
+    border-radius: 10px; color-scheme: dark;
+  }
+  select:disabled { color: var(--muted); }
+  select:focus-visible { outline: 2px solid var(--neon); outline-offset: 2px; }
   .row { display: flex; gap: 8px; }
   .btn {
     flex: 1; background: rgba(255, 255, 255, 0.09); border: 1px solid var(--line);
@@ -167,6 +174,13 @@
     <div class="seg" role="group" aria-label="Color map">
       <button type="button" data-mode="neon" aria-pressed="true">Neon green</button>
       <button type="button" data-mode="invert" aria-pressed="false">Inverted mono</button>
+    </div>
+
+    <div class="ctl">
+      <label for="camSelect">Camera source</label>
+      <select id="camSelect" disabled>
+        <option value="">Start the camera to list sources</option>
+      </select>
     </div>
 
     <div class="row">
@@ -505,13 +519,13 @@ function workerMain(self) {
     sheet: $('sheet'), grip: $('grip'),
     gain: $('gain'), sens: $('sens'), opacity: $('opacity'),
     gainOut: $('gainOut'), sensOut: $('sensOut'), opacityOut: $('opacityOut'),
-    flip: $('flipBtn'), torch: $('torchBtn'), reset: $('resetBtn'),
+    flip: $('flipBtn'), camSelect: $('camSelect'), torch: $('torchBtn'), reset: $('resetBtn'),
     gate: $('gate'), gateTitle: $('gateTitle'), gateBody: $('gateBody'), gateNote: $('gateNote'), gateBtn: $('gateBtn')
   };
   var modeBtns = Array.prototype.slice.call(document.querySelectorAll('.seg button'));
 
   var state = {
-    facing: 'environment', wantRunning: false, running: false,
+    facing: 'environment', deviceId: null, cameras: [], wantRunning: false, running: false,
     stream: null, track: null, camW: 0, camH: 0,
     vw: 0, vh: 0, w: 0, h: 0,
     inFlight: false, sentAt: 0, lastSend: 0, frameId: 0, lastVideoTime: -1,
@@ -691,16 +705,25 @@ function workerMain(self) {
     el.torch.hidden = true; el.torch.setAttribute('aria-pressed', 'false');
   }
 
-  function constraintAttempts(facing) {
-    var f = { ideal: facing };
-    return [
+  function constraintAttempts(facing, deviceId) {
+    // A chosen device (e.g. a USB camera) is selected by deviceId; otherwise by facing direction.
+    var sel = deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: facing } };
+    function make(extra) {
+      var v = {}, k;
+      for (k in sel) v[k] = sel[k];
+      for (k in extra) v[k] = extra[k];
+      return { audio: false, video: v };
+    }
+    var list = [
       // Strict QVGA cap at 30 fps
-      { audio: false, video: { facingMode: f, width: { ideal: 320, max: 320 }, height: { ideal: 240, max: 240 }, frameRate: { ideal: 30, max: 30 } } },
+      make({ width: { ideal: 320, max: 320 }, height: { ideal: 240, max: 240 }, frameRate: { ideal: 30, max: 30 } }),
       // Soft cap: ask for QVGA, accept up to VGA (downscaled to <=320x240 before processing)
-      { audio: false, video: { facingMode: f, width: { ideal: 320, max: 640 }, height: { ideal: 240, max: 480 }, frameRate: { ideal: 30, max: 30 } } },
-      { audio: false, video: { facingMode: f } },
-      { audio: false, video: true }
+      make({ width: { ideal: 320, max: 640 }, height: { ideal: 240, max: 480 }, frameRate: { ideal: 30, max: 30 } }),
+      // Device defaults (some USB cameras only offer fixed modes)
+      make({})
     ];
+    if (!deviceId) list.push({ audio: false, video: true });
+    return list;
   }
 
   async function startCamera() {
@@ -717,7 +740,7 @@ function workerMain(self) {
       return;
     }
 
-    var attempts = constraintAttempts(state.facing), stream = null, lastErr = null, i;
+    var attempts = constraintAttempts(state.facing, state.deviceId), stream = null, lastErr = null, i;
     for (i = 0; i < attempts.length && !stream; i++) {
       try { stream = await navigator.mediaDevices.getUserMedia(attempts[i]); }
       catch (err) {
@@ -725,6 +748,13 @@ function workerMain(self) {
         if (err && (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError' ||
             err.name === 'SecurityError' || err.name === 'NotReadableError' || err.name === 'NotFoundError')) break;
       }
+    }
+    if (!stream && state.deviceId && lastErr &&
+        (lastErr.name === 'NotFoundError' || lastErr.name === 'OverconstrainedError' || lastErr.name === 'DevicesNotFoundError')) {
+      // The selected camera is gone (e.g. USB unplugged): fall back to the facing-mode camera once.
+      state.deviceId = null;
+      refreshCameras();
+      return startCamera();
     }
     if (!stream) {
       var d = describeError(lastErr);
@@ -756,8 +786,10 @@ function workerMain(self) {
 
     var s = (state.track.getSettings && state.track.getSettings()) || {};
     state.camW = s.width || video.videoWidth; state.camH = s.height || video.videoHeight;
-    var front = s.facingMode ? s.facingMode === 'user' : state.facing === 'user';
+    // Mirror only cameras that report themselves as front-facing; USB cameras are not mirrored.
+    var front = s.facingMode ? s.facingMode === 'user' : (!state.deviceId && state.facing === 'user');
     view.classList.toggle('mirror', front);
+    refreshCameras();   // labels are only available after permission is granted
 
     try {
       var caps = state.track.getCapabilities ? state.track.getCapabilities() : null;
@@ -819,10 +851,56 @@ function workerMain(self) {
   /* ---------------- UI events ---------------- */
   el.gateBtn.addEventListener('click', startCamera);
 
-  el.flip.addEventListener('click', function () {
-    state.facing = state.facing === 'user' ? 'environment' : 'user';
+  async function refreshCameras() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+    var list;
+    try {
+      list = (await navigator.mediaDevices.enumerateDevices()).filter(function (d) { return d.kind === 'videoinput'; });
+    } catch (e) { return; }
+    state.cameras = list;
+    var cur = (state.track && state.track.getSettings && state.track.getSettings().deviceId) || state.deviceId || '';
+    el.camSelect.textContent = '';
+    if (!list.length) {
+      var ph = document.createElement('option');
+      ph.value = ''; ph.textContent = 'No cameras found';
+      el.camSelect.appendChild(ph);
+      el.camSelect.disabled = true;
+      return;
+    }
+    list.forEach(function (d, i) {
+      var o = document.createElement('option');
+      o.value = d.deviceId;
+      o.textContent = d.label || ('Camera ' + (i + 1));
+      el.camSelect.appendChild(o);
+    });
+    if (cur) el.camSelect.value = cur;
+    el.camSelect.disabled = false;
+  }
+
+  el.camSelect.addEventListener('change', function () {
+    state.deviceId = el.camSelect.value || null;
     startCamera();
   });
+
+  el.flip.addEventListener('click', function () {
+    var list = state.cameras;
+    if (list.length > 1) {
+      // Cycle through every camera the browser reports (front, back, USB...)
+      var cur = (state.track && state.track.getSettings && state.track.getSettings().deviceId) || state.deviceId;
+      var idx = -1, i;
+      for (i = 0; i < list.length; i++) if (list[i].deviceId === cur) { idx = i; break; }
+      state.deviceId = list[(idx + 1) % list.length].deviceId;
+    } else {
+      state.deviceId = null;
+      state.facing = state.facing === 'user' ? 'environment' : 'user';
+    }
+    startCamera();
+  });
+
+  if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+    // Updates the list when a USB camera is plugged in or removed
+    navigator.mediaDevices.addEventListener('devicechange', refreshCameras);
+  }
 
   el.torch.addEventListener('click', async function () {
     if (!state.track) return;
